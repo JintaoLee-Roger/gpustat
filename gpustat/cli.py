@@ -151,6 +151,10 @@ def main(*argv):
                         help='Display username of running process')
     parser.add_argument('-p', '--show-pid', action='store_true',
                         help='Display PID of running process')
+    parser.add_argument('--show-temperature', dest='show_temperature', 
+                        action='store_true', help='Display GPU temperature')
+    parser.add_argument('--show-gpuname', dest='show_gpuname', 
+                        action='store_true', help='Display GPU name')
     parser.add_argument('-F', '--show-fan-speed', '--show-fan',
                         action='store_true', help='Display GPU fan speed')
     codec_choices = ['', 'enc', 'dec', 'enc,dec']
@@ -202,6 +206,8 @@ def main(*argv):
         args.show_user = True
         args.show_pid = True
         args.show_fan_speed = True
+        args.show_temperature = True
+        args.show_gpuname = True
         args.show_codec = 'enc,dec'
         args.show_power = 'draw,limit'
     del args.show_all  # type: ignore

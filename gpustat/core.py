@@ -207,6 +207,8 @@ class GPUStat:
                  no_processes=False,
                  show_user=False,
                  show_pid=False,
+                 show_gpuname=False,
+                 show_temperature=False,
                  show_fan_speed=None,
                  show_codec="",
                  show_power=None,
@@ -238,7 +240,7 @@ class GPUStat:
         colors['CMemT'] = _conditional(lambda: self.available, term.yellow, term.bold_black)
         colors['CMemP'] = term.yellow
         colors['CCPUMemU'] = term.yellow
-        colors['CUser'] = term.bold_black   # gray
+        colors['CUser'] = term.bold_gray   # gray
         colors['CUtil'] = _conditional(lambda: self.utilization < 30, term.green, term.bold_green)
         colors['CUtilEnc'] = _conditional(
             lambda: self.utilization_enc < _ENC_THRESHOLD,
@@ -298,13 +300,14 @@ class GPUStat:
         _write(f"[{self.index}]", color=term.cyan)
         _write(" ")
 
-        if gpuname_width is None or gpuname_width != 0:
+        if show_gpuname and  (gpuname_width is None or gpuname_width != 0):
             gpuname_width = gpuname_width or DEFAULT_GPUNAME_WIDTH
             _write(f"{util.shorten_left(self.name, width=gpuname_width, placeholder='…'):{gpuname_width}}",
                    color='CName')
             _write(" |")
 
-        _write(rjustify(safe_self.temperature, 3), "°C", color='CTemp', end=', ')
+        if show_temperature:
+            _write(rjustify(safe_self.temperature, 3), "°C", color='CTemp', end=', ')
 
         if show_fan_speed:
             _write(rjustify(safe_self.fan_speed, 3), " %", color='FSpeed', end=', ')
@@ -384,6 +387,8 @@ class GPUStat:
             _write(' ', '(', NOT_SUPPORTED, ')')
         elif not no_processes:
             for p in (processes or []):
+                if p['username'] == 'gdm':
+                    continue
                 _write(' ', process_repr(p))
                 if show_full_cmd:
                     full_processes.append(eol_char + full_process_info(p))
@@ -651,7 +656,9 @@ class GPUStatCollection(Sequence[GPUStat]):
     def print_formatted(self, fp=sys.stdout, *,
                         force_color=False, no_color=False,
                         show_cmd=False, show_full_cmd=False, show_user=False,
-                        show_pid=False, show_fan_speed=None,
+                        show_pid=False, show_gpuname=False,
+                        show_temperature=False, 
+                        show_fan_speed=None,
                         show_codec="", show_power=None,
                         gpuname_width=None, show_header=True,
                         no_processes=False,
@@ -689,7 +696,7 @@ class GPUStatCollection(Sequence[GPUStat]):
                 timestr = self.query_time.strftime(time_format)
             header_template = '{t.bold_white}{hostname:{width}}{t.normal}  '
             header_template += '{timestr}  '
-            header_template += '{t.bold_black}{driver_version}{t.normal}'
+            header_template += '{t.bold_cyan}{driver_version}{t.normal}'
 
             header_msg = header_template.format(
                     hostname=self.hostname,
@@ -710,6 +717,8 @@ class GPUStatCollection(Sequence[GPUStat]):
                        no_processes=no_processes,
                        show_user=show_user,
                        show_pid=show_pid,
+                       show_gpuname=show_gpuname,
+                       show_temperature=show_temperature,
                        show_fan_speed=show_fan_speed,
                        show_codec=show_codec,
                        show_power=show_power,
