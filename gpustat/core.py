@@ -387,7 +387,7 @@ class GPUStat:
             _write(' ', '(', NOT_SUPPORTED, ')')
         elif not no_processes:
             for p in (processes or []):
-                if p['username'] == 'gdm':
+                if p['username'] == 'gdm' or p['command'] == 'Xorg':
                     continue
                 _write(' ', process_repr(p))
                 if show_full_cmd:

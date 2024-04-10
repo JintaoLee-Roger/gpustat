@@ -1,6 +1,9 @@
 A fork from [wookayin/gpustat](https://github.com/wookayin/gpustat) with some modified.
 ============================================================================================
 
+```
+pip install git+https://github.com/JintaoLee-Roger/gpustat.git@master
+```
 
 
 `gpustat`
