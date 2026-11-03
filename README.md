@@ -6,6 +6,44 @@ pip install git+https://github.com/JintaoLee-Roger/gpustat.git@master
 ```
 
 
+### Compact monitoring (this fork)
+
+```bash
+gpustat -cpu -i 1
+```
+
+Shows GPU utilization, used/total GPU memory, and each process as
+`user:command/PID(memoryM)`. GPU names and temperatures are opt-in through
+`--show-gpuname` and `--show-temperature`.
+
+Text output hides `gdm` and `Xorg` on Linux. On Windows it hides an exact-name
+list of desktop and system executables, including `dwm.exe`, `explorer.exe`,
+`svchost.exe`, Windows shell/search/input hosts and Runtime Broker. Matching is
+case-insensitive. Browsers, editors, terminals and unknown processes remain
+visible. Use `--show-system-processes` to include all entries. The complete
+Windows list is `WINDOWS_SYSTEM_PROCESSES` in `gpustat/core.py`. JSON output
+always contains the raw, unfiltered process records.
+
+GPU memory totals include system allocations even when their process entries
+are hidden. If a PID is not accessible (permissions, containers, or process
+exit during a query), its NVML record is retained and unavailable metadata is
+shown as `?`. Entries disappear once NVML stops reporting them. This can also
+make stale driver contexts visible. Windows WDDM generally does not expose
+per-process GPU memory through NVML; these entries show `?M`, not zero or a
+fabricated value. TCC devices can report per-process memory when supported.
+
+The optional hardware check requires PyTorch:
+
+```bash
+python test_a100.py --monitor --seconds 30 --devices 0
+```
+
+Use a comma-separated device list to check multiple GPUs. The check retains a
+small allocation on each selected GPU and verifies its own username, command,
+PID, and reported memory on each refresh. Under WDDM it accepts unavailable
+process memory. Unit tests (`python -m pytest`) do not require a GPU or PyTorch.
+
+
 `gpustat`
 =========
 

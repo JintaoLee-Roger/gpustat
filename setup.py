@@ -91,15 +91,14 @@ class DeployCommand(Command):
 
 install_requires = [
     'nvidia-ml-py>=12.535.108',  # see #107, #143, #161
-    'psutil>=5.6.0',    # GH-1447
-    'blessed>=1.17.1',  # GH-126
+    'psutil>=5.9.8',    # modern Python and Windows support
+    'blessed>=1.20.0',  # older releases reject Python 3.10+ at import
     'typing_extensions',
 ]
 
 tests_requires = [
     'mockito>=1.2.1',
     'pytest>=5.4.1',  # python 3.6+
-    'pytest-runner',
 ]
 
 setup(
@@ -130,7 +129,6 @@ setup(
     packages=['gpustat'],
     install_requires=install_requires,
     extras_require={'test': tests_requires, 'completion': ['shtab']},
-    tests_require=tests_requires,
     entry_points={
         'console_scripts': ['gpustat=gpustat:main'],
     },

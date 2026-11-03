@@ -195,6 +195,8 @@ def main(*argv):
         '--no-processes', dest='no_processes', action='store_true',
         help='Do not display running process information (memory, user, etc.)'
     )
+    parser.add_argument('--show-system-processes', action='store_true',
+                        help='Include desktop and system processes in text output')
     parser.add_argument('-v', '--version', action='version',
                         version=('gpustat %s' % __version__))
     args = parser.parse_args(argv[1:])

@@ -3,6 +3,7 @@
 # pylint: disable=protected-access
 
 import atexit
+import ctypes
 import functools
 import os
 import sys
@@ -126,42 +127,11 @@ class pynvml_monkeypatch:
     def original_nvmlGetFunctionPointer(name):
         return _original_nvmlGetFunctionPointer(name)
 
-    FUNCTION_FALLBACKS = {
-        # for pynvml._nvmlGetFunctionPointer
-        'nvmlDeviceGetComputeRunningProcesses_v3': 'nvmlDeviceGetComputeRunningProcesses_v2',
-        'nvmlDeviceGetGraphicsRunningProcesses_v3': 'nvmlDeviceGetGraphicsRunningProcesses_v2',
-    }
-
     @staticmethod
-    @functools.wraps(pynvml._nvmlGetFunctionPointer)
     def _nvmlGetFunctionPointer(name):
-        """Our monkey-patched pynvml._nvmlGetFunctionPointer().
-
-        See also:
-            test_gpustat::NvidiaDriverMock for test scenarios. See #107.
-        """
-        M = pynvml_monkeypatch
-
-        try:
-            ret = M.original_nvmlGetFunctionPointer(name)
-            return ret
-        except pynvml.NVMLError_FunctionNotFound:  # type: ignore
-            if name in M.FUNCTION_FALLBACKS:
-                # Lack of ...Processes_v3 APIs happens for
-                # OLD drivers < 510.39.01 && pynvml >= 11.510, where
-                # we fallback to v2 APIs. (see #107 for more details)
-
-                ret = M.original_nvmlGetFunctionPointer(
-                    M.FUNCTION_FALLBACKS[name]
-                )
-                # populate the cache, so this handler won't get executed again
-                pynvml._nvmlGetFunctionPointer_cache[name] = ret
-
-            else:
-                # Unknown case, cannot handle. re-raise again
-                raise
-
-        return ret
+        # Never substitute a different API version's C function pointer: the
+        # Python binding must allocate the matching process-info structure.
+        return pynvml_monkeypatch.original_nvmlGetFunctionPointer(name)
 
     @staticmethod  # Note: must be defined as a staticmethod to allow mocking.
     def original_nvmlDeviceGetMemoryInfo(*args, **kwargs):
@@ -191,8 +161,8 @@ class pynvml_monkeypatch:
             try:
                 memory = M.original_nvmlDeviceGetMemoryInfo(
                     handle, version=pynvml.nvmlMemory_v2)
-            except pynvml.NVMLError_FunctionNotFound:  # type: ignore
-                # pynvml >= 11.510 but driver is old (<515.39)
+            except (pynvml.NVMLError_FunctionNotFound, pynvml.NVMLError_NotSupported):
+                # Older drivers/devices may expose v2 but not support it.
                 memory = M.original_nvmlDeviceGetMemoryInfo(handle)
         else:
             if M.has_memoryinfo_v2:
@@ -209,6 +179,68 @@ class pynvml_monkeypatch:
 
 setattr(pynvml, '_nvmlGetFunctionPointer', pynvml_monkeypatch._nvmlGetFunctionPointer)
 setattr(pynvml, 'nvmlDeviceGetMemoryInfo', pynvml_monkeypatch.nvmlDeviceGetMemoryInfo)
+
+
+def _running_processes(handle, name):
+    # Processes can start between NVML's size and data calls. A transient
+    # insufficient buffer must not turn the whole process list into "N/A".
+    for attempt in range(3):
+        try:
+            return _running_processes_once(handle, name)
+        except pynvml.NVMLError_InsufficientSize:
+            if attempt == 2:
+                raise
+
+
+def _running_processes_once(handle, name):
+    try:
+        return getattr(pynvml, name)(handle)
+    except (pynvml.NVMLError_FunctionNotFound,
+            getattr(pynvml, 'NVMLLibraryMismatchError', pynvml.NVMLError_FunctionNotFound)):
+        # Recent bindings translate missing unversioned APIs to a mismatch
+        # exception. The versioned v2 API still works on these older drivers.
+        # Use the public binding so its array layout matches the v2 ABI.
+        fallback = getattr(pynvml, name + '_v2', None)
+        if fallback is not None:
+            return fallback(handle)
+        return _running_processes_v2(handle, name)
+
+
+def _running_processes_v2(handle, name):
+    """Older bindings omit the public v2 function; use its explicit ABI.
+
+    Never pass a v3 array to the v2 function. NVML can grow the process list
+    between the size query and the data query, so allow bounded retries.
+    """
+    fn = pynvml._nvmlGetFunctionPointer(name + '_v2')
+    count = ctypes.c_uint(0)
+    result = fn(handle, ctypes.byref(count), None)
+    if result == pynvml.NVML_SUCCESS:
+        return []
+    if result != pynvml.NVML_ERROR_INSUFFICIENT_SIZE:
+        pynvml._nvmlCheckReturn(result)
+    for _ in range(3):
+        count.value = count.value * 2 + 5
+        array = (pynvml.c_nvmlProcessInfo_v2_t * count.value)()
+        result = fn(handle, ctypes.byref(count), array)
+        if result == pynvml.NVML_ERROR_INSUFFICIENT_SIZE:
+            continue
+        pynvml._nvmlCheckReturn(result)
+        processes = [pynvml.nvmlStructToFriendlyObject(array[i])
+                     for i in range(count.value)]
+        for process in processes:
+            if process.usedGpuMemory == (1 << 64) - 1:
+                process.usedGpuMemory = None
+        return processes
+    pynvml._nvmlCheckReturn(result)
+
+
+def nvmlDeviceGetComputeRunningProcesses(handle):
+    return _running_processes(handle, 'nvmlDeviceGetComputeRunningProcesses')
+
+
+def nvmlDeviceGetGraphicsRunningProcesses(handle):
+    return _running_processes(handle, 'nvmlDeviceGetGraphicsRunningProcesses')
 
 
 # Upon importing this module, let pynvml be initialized and remain active

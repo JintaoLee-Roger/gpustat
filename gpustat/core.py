@@ -19,6 +19,7 @@ except ModuleNotFoundError:
 
 import json
 import locale
+import ntpath
 import os.path
 import platform
 import sys
@@ -42,6 +43,33 @@ DEFAULT_GPUNAME_WIDTH = 16
 IS_WINDOWS = 'windows' in platform.platform().lower()
 
 
+# Exact executable names only: do not hide user applications such as browsers,
+# terminals or Python simply because they use a graphics context.
+WINDOWS_SYSTEM_PROCESSES = frozenset({
+    'system', 'system idle process', 'registry', 'secure system',
+    'memory compression', 'dwm.exe', 'csrss.exe', 'winlogon.exe',
+    'wininit.exe', 'services.exe', 'svchost.exe', 'lsass.exe',
+    'fontdrvhost.exe', 'sihost.exe', 'taskhostw.exe', 'explorer.exe',
+    'shellexperiencehost.exe', 'startmenuexperiencehost.exe',
+    'searchhost.exe', 'searchapp.exe', 'searchui.exe', 'searchindexer.exe',
+    'textinputhost.exe', 'ctfmon.exe', 'runtimebroker.exe',
+    'applicationframehost.exe', 'backgroundtaskhost.exe', 'lockapp.exe',
+    'widgets.exe', 'widgetservice.exe',
+})
+
+
+def is_system_process(process):
+    command = process.get('command', '?')
+    if IS_WINDOWS:
+        return ntpath.basename(command).casefold() in WINDOWS_SYSTEM_PROCESSES
+    return process.get('username') == 'gdm' or command == 'Xorg'
+
+
+def _gpu_memory_mb(value):
+    # NVML_VALUE_NOT_AVAILABLE is an unsigned long long sentinel (WDDM).
+    return value // MB if value is not None and 0 <= value < (1 << 64) - 1 else None
+
+
 # Types
 NVMLHandle = Any  # N.c_nvmlDevice_t
 Megabytes = int
@@ -62,8 +90,8 @@ NvidiaGPUInfo = TypedDict('NvidiaGPUInfo', {
     'utilization.dec': Optional[Percentage],
     'power.draw': Optional[Watts],
     'enforced.power.limit': Optional[Watts],
-    'memory.used': Megabytes,
-    'memory.total': Megabytes,
+    'memory.used': Optional[Megabytes],
+    'memory.total': Optional[Megabytes],
     'processes': Optional[List[ProcessInfo]],
 }, total=False) if TYPE_CHECKING else dict  # type: ignore
 
@@ -109,23 +137,25 @@ class GPUStat:
         return self.entry['name']
 
     @property
-    def memory_total(self) -> Megabytes:
+    def memory_total(self) -> Optional[Megabytes]:
         """Returns the total memory (in MB) as an integer."""
-        return int(self.entry['memory.total'])
+        value = self.entry['memory.total']
+        return int(value) if value is not None else None
 
     @property
-    def memory_used(self) -> Megabytes:
+    def memory_used(self) -> Optional[Megabytes]:
         """Returns the occupied memory (in MB) as an integer."""
-        return int(self.entry['memory.used'])
+        value = self.entry['memory.used']
+        return int(value) if value is not None else None
 
     @property
-    def memory_free(self) -> Megabytes:
+    def memory_free(self) -> Optional[Megabytes]:
         """Returns the free (available) memory (in MB) as an integer."""
-        v = self.memory_total - self.memory_used
-        return max(v, 0)
+        total, used = self.memory_total, self.memory_used
+        return max(total - used, 0) if total is not None and used is not None else None
 
     @property
-    def memory_available(self) -> Megabytes:
+    def memory_available(self) -> Optional[Megabytes]:
         """Returns the available memory (in MB) as an integer.
 
         Alias to memory_free.
@@ -205,6 +235,7 @@ class GPUStat:
                  show_cmd=False,
                  show_full_cmd=False,
                  no_processes=False,
+                 show_system_processes=False,
                  show_user=False,
                  show_pid=False,
                  show_gpuname=False,
@@ -300,7 +331,7 @@ class GPUStat:
         _write(f"[{self.index}]", color=term.cyan)
         _write(" ")
 
-        if show_gpuname and  (gpuname_width is None or gpuname_width != 0):
+        if (show_gpuname or not self.available) and (gpuname_width is None or gpuname_width != 0):
             gpuname_width = gpuname_width or DEFAULT_GPUNAME_WIDTH
             _write(f"{util.shorten_left(self.name, width=gpuname_width, placeholder='…'):{gpuname_width}}",
                    color='CName')
@@ -387,7 +418,7 @@ class GPUStat:
             _write(' ', '(', NOT_SUPPORTED, ')')
         elif not no_processes:
             for p in (processes or []):
-                if p['username'] == 'gdm' or p['command'] == 'Xorg':
+                if not show_system_processes and is_system_process(p):
                     continue
                 _write(' ', process_repr(p))
                 if show_full_cmd:
@@ -456,7 +487,7 @@ class GPUStatCollection(Sequence[GPUStat]):
 
         def _decode(b: Union[str, bytes]) -> str:
             if isinstance(b, bytes):
-                return b.decode('utf-8')
+                return b.decode('utf-8', errors='replace')
             assert isinstance(b, str)
             return b
 
@@ -474,10 +505,13 @@ class GPUStatCollection(Sequence[GPUStat]):
             def get_process_info(nv_process) -> ProcessInfo:
                 """Get the process information of specific pid"""
                 process = {}
-                if nv_process.pid not in GPUStatCollection.global_processes:
-                    GPUStatCollection.global_processes[nv_process.pid] = \
-                        psutil.Process(pid=nv_process.pid)
-                ps_process: psutil.Process = GPUStatCollection.global_processes[nv_process.pid]
+                # A PID can be recycled between refreshes. Compare process
+                # identity (including creation time) before reusing CPU samples.
+                ps_process = psutil.Process(pid=nv_process.pid)
+                cached = GPUStatCollection.global_processes.get(nv_process.pid)
+                if cached is not None and cached == ps_process:
+                    ps_process = cached
+                GPUStatCollection.global_processes[nv_process.pid] = ps_process
 
                 # TODO: ps_process is being cached, but the dict below is not.
                 process['username'] = safepcall(ps_process.username, '?')
@@ -486,16 +520,14 @@ class GPUStatCollection(Sequence[GPUStat]):
                 _cmdline = safepcall(ps_process.cmdline, [])
                 if not _cmdline:
                     # sometimes, zombie or unknown (e.g. [kworker/8:2H])
-                    process['command'] = '?'
-                    process['full_command'] = ['?']
+                    process['command'] = safepcall(ps_process.name, '?')
+                    process['full_command'] = [process['command']]
                 else:
-                    process['command'] = os.path.basename(_cmdline[0])
+                    process['command'] = (ntpath if IS_WINDOWS else os.path).basename(_cmdline[0])
                     process['full_command'] = _cmdline
                 # Bytes to MBytes
                 # if drivers are not TTC this will be None.
-                usedmem = nv_process.usedGpuMemory // MB if \
-                          nv_process.usedGpuMemory else None
-                process['gpu_memory_usage'] = usedmem
+                process['gpu_memory_usage'] = _gpu_memory_mb(nv_process.usedGpuMemory)
 
                 process['cpu_percent'] = safepcall(ps_process.cpu_percent, 0.0)
                 process['cpu_memory_usage'] = safepcall(
@@ -529,9 +561,9 @@ class GPUStatCollection(Sequence[GPUStat]):
 
             # memory: in Bytes
             # Note that this is a compat-patched API (see gpustat.nvml)
-            memory = N.nvmlDeviceGetMemoryInfo(handle)
-            gpu_info['memory.used'] = int(memory.used) // MB
-            gpu_info['memory.total'] = int(memory.total) // MB
+            memory = safenvml(N.nvmlDeviceGetMemoryInfo)(handle)
+            gpu_info['memory.used'] = _gpu_memory_mb(memory.used) if memory is not None else None
+            gpu_info['memory.total'] = _gpu_memory_mb(memory.total) if memory is not None else None
 
             # GPU utilization
             utilization = safenvml(N.nvmlDeviceGetUtilizationRates)(handle)
@@ -551,8 +583,8 @@ class GPUStatCollection(Sequence[GPUStat]):
             gpu_info['enforced.power.limit'] = power_limit // 1000 if power_limit is not None else None
 
             # Processes
-            nv_comp_processes = safenvml(N.nvmlDeviceGetComputeRunningProcesses)(handle)
-            nv_graphics_processes = safenvml(N.nvmlDeviceGetGraphicsRunningProcesses)(handle)
+            nv_comp_processes = safenvml(nvml.nvmlDeviceGetComputeRunningProcesses)(handle)
+            nv_graphics_processes = safenvml(nvml.nvmlDeviceGetGraphicsRunningProcesses)(handle)
 
             if nv_comp_processes is None and nv_graphics_processes is None:
                 processes = None
@@ -570,29 +602,25 @@ class GPUStatCollection(Sequence[GPUStat]):
                     try:
                         process = get_process_info(nv_process)
                         processes.append(process)
-                    except psutil.NoSuchProcess:
-                        # TODO: add some reminder for NVML broken context
-                        # e.g. nvidia-smi reset  or  reboot the system
-                        pass
-                    except psutil.AccessDenied:
-                        pass
-                    except FileNotFoundError:
-                        # Ignore the exception which probably has occured
-                        # from psutil, due to a non-existent PID (see #95).
-                        # The exception should have been translated, but
-                        # there appears to be a bug of psutil. It is unlikely
-                        # FileNotFoundError is thrown in different situations.
-                        pass
+                    except (psutil.NoSuchProcess, psutil.AccessDenied,
+                            FileNotFoundError) as e:
+                        # NVML may report host PIDs invisible in this container,
+                        # or /proc may be restricted. Keep the GPU allocation
+                        # even when process metadata cannot be resolved.
+                        log.add_exception("process %d" % nv_process.pid, e)
+                        usedmem = nv_process.usedGpuMemory
+                        processes.append({
+                            'pid': nv_process.pid,
+                            'username': '?',
+                            'command': '?',
+                            'full_command': ['?'],
+                            'gpu_memory_usage': _gpu_memory_mb(usedmem),
+                            'cpu_percent': 0.0,
+                            'cpu_memory_usage': 0,
+                        })
 
-                # TODO: Do not block if full process info is not requested
-                time.sleep(0.1)
-                for process in processes:
-                    pid = process['pid']
-                    cache_process: psutil.Process = GPUStatCollection.global_processes[pid]
-                    process['cpu_percent'] = safepcall(cache_process.cpu_percent, 0)
             gpu_info['processes'] = processes
 
-            GPUStatCollection.clean_processes()
             return gpu_info
 
         # 1. get the list of gpu and status
@@ -621,6 +649,23 @@ class GPUStatCollection(Sequence[GPUStat]):
             if isinstance(gpu_stat, InvalidGPU):
                 log.add_exception("GPU %d" % index, gpu_stat.exception)
             gpu_list.append(gpu_stat)
+
+        # Sample once per PID and refresh, rather than sleeping once per GPU
+        # and consuming the CPU delta repeatedly for multi-GPU processes.
+        pids = {p['pid'] for gpu in gpu_list for p in (gpu.processes or [])}
+        cached_pids = pids.intersection(GPUStatCollection.global_processes)
+        if cached_pids:
+            time.sleep(0.1)
+            cpu_percent = {}
+            for pid in cached_pids:
+                try:
+                    cpu_percent[pid] = GPUStatCollection.global_processes[pid].cpu_percent()
+                except (psutil.AccessDenied, psutil.NoSuchProcess, FileNotFoundError):
+                    cpu_percent[pid] = 0.0
+            for gpu in gpu_list:
+                for process in gpu.processes or []:
+                    process['cpu_percent'] = cpu_percent.get(process['pid'], 0.0)
+        GPUStatCollection.clean_processes()
 
         # 2. additional info (driver version, etc).
         # TODO: check this only once, no need to call multiple times
@@ -661,7 +706,7 @@ class GPUStatCollection(Sequence[GPUStat]):
                         show_fan_speed=None,
                         show_codec="", show_power=None,
                         gpuname_width=None, show_header=True,
-                        no_processes=False,
+                        no_processes=False, show_system_processes=False,
                         eol_char=os.linesep,
                         ):
         # ANSI color configuration
@@ -715,6 +760,7 @@ class GPUStatCollection(Sequence[GPUStat]):
                        show_cmd=show_cmd,
                        show_full_cmd=show_full_cmd,
                        no_processes=no_processes,
+                       show_system_processes=show_system_processes,
                        show_user=show_user,
                        show_pid=show_pid,
                        show_gpuname=show_gpuname,

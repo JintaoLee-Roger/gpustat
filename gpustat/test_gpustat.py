@@ -189,6 +189,7 @@ def _configure_mock(N=pynvml,
         p: Any = mock(strict=True)   # psutil.Process
         p.username = lambda: username
         p.cmdline = lambda: [cmdline]
+        p.name = lambda: cmdline
         p.cpu_percent = lambda: cpuutil
         p.memory_percent = lambda: memutil
         p.pid = pid
@@ -201,9 +202,9 @@ def _configure_mock(N=pynvml,
 
 
 MOCK_EXPECTED_OUTPUT_DEFAULT = os.linesep.join("""\
-[0] GeForce GTX TITAN 0 | 80°C,  76 % |  8000 / 12287 MB | user1(4000M) user2(4000M)
-[1] GeForce GTX TITAN 1 | 36°C,   0 % |  9000 / 12189 MB | user1(3000M) user3(6000M)
-[2] GeForce RTX 2       | 71°C,  ?? % |     0 / 12189 MB | (Not Supported)
+[0]  76 % |  8000 / 12287 MB | user1(4000M) user2(4000M)
+[1]   0 % |  9000 / 12189 MB | user1(3000M) user3(6000M)
+[2]  ?? % |     0 / 12189 MB | (Not Supported)
 """.splitlines())  # noqa: E501
 
 MOCK_EXPECTED_OUTPUT_FULL = os.linesep.join("""\
@@ -223,9 +224,9 @@ MOCK_EXPECTED_OUTPUT_FULL_PROCESS = os.linesep.join("""\
 """.splitlines())  # noqa: E501
 
 MOCK_EXPECTED_OUTPUT_NO_PROCESSES = os.linesep.join("""\
-[0] GeForce GTX TITAN 0 | 80°C,  76 % |  8000 / 12287 MB
-[1] GeForce GTX TITAN 1 | 36°C,   0 % |  9000 / 12189 MB
-[2] GeForce RTX 2       | 71°C,  ?? % |     0 / 12189 MB
+[0]  76 % |  8000 / 12287 MB
+[1]   0 % |  9000 / 12189 MB
+[2]  ?? % |     0 / 12189 MB
 """.splitlines())  # noqa: E501
 
 # -----------------------------------------------------------------------------
@@ -375,11 +376,11 @@ class NvidiaDriverMock:
             else:
                 c_count._obj.value = 2
                 if handle.index == 0:
-                    c = process_t(pid=48448, usedGpuMemory=4000*MB); c_procs[0] = c
-                    c = process_t(pid=153223, usedGpuMemory=4000*MB); c_procs[1] = c
+                    c = process_t(pid=48448, usedGpuMemory=4000*MB); c_procs[0] = c_procs._type_(pid=c.pid, usedGpuMemory=c.usedGpuMemory)
+                    c = process_t(pid=153223, usedGpuMemory=4000*MB); c_procs[1] = c_procs._type_(pid=c.pid, usedGpuMemory=c.usedGpuMemory)
                 elif handle.index == 1:
-                    c = process_t(pid=192453, usedGpuMemory=3000*MB); c_procs[0] = c
-                    c = process_t(pid=194826, usedGpuMemory=6000*MB); c_procs[1] = c
+                    c = process_t(pid=192453, usedGpuMemory=3000*MB); c_procs[0] = c_procs._type_(pid=c.pid, usedGpuMemory=c.usedGpuMemory)
+                    c = process_t(pid=194826, usedGpuMemory=6000*MB); c_procs[1] = c_procs._type_(pid=c.pid, usedGpuMemory=c.usedGpuMemory)
                 else:
                     return pynvml.NVML_ERROR_NOT_SUPPORTED
             return pynvml.NVML_SUCCESS
@@ -390,7 +391,7 @@ class NvidiaDriverMock:
             else:
                 if handle.index == 0:
                     c_count._obj.value = 1
-                    c = process_t(pid=48448, usedGpuMemory=4000*MB); c_procs[0] = c
+                    c = process_t(pid=48448, usedGpuMemory=4000*MB); c_procs[0] = c_procs._type_(pid=c.pid, usedGpuMemory=c.usedGpuMemory)
                 elif handle.index == 1:
                     c_count._obj.value = 0
                 else:
@@ -503,9 +504,11 @@ class TestGPUStat(object):
     def setup_method(self):
         print("")
         self.maxDiff = 4096
+        gpustat.GPUStatCollection.global_processes.clear()
 
     def teardown_method(self):
         unstub()
+        gpustat.GPUStatCollection.global_processes.clear()
 
     @staticmethod
     def capture_output(*args):
@@ -534,6 +537,7 @@ class TestGPUStat(object):
             fp=fp, no_color=False, show_user=True,
             show_cmd=True, show_full_cmd=True, show_pid=True,
             show_fan_speed=True, show_codec="enc,dec", show_power=True,
+            show_gpuname=True, show_temperature=True,
         )
 
         result = fp.getvalue()
@@ -566,11 +570,13 @@ class TestGPUStat(object):
         ret = fp.getvalue()
         print(ret)
 
-        # gpu 2: should ignore process id
+        # Preserve NVML allocations even when /proc cannot resolve the PID.
         line = remove_ansi_codes(ret).split('\n')[3]
-        assert '[2] GeForce RTX 2' in line, str(line)
-        assert '99999' not in line
+        assert '[2]' in line, str(line)
         assert '(Not Supported)' not in line
+        assert [p['pid'] for p in gpustats[2].processes] == [99999, 99995]
+        assert gpustats[2].processes[0]['gpu_memory_usage'] == 9999
+        assert all(p['username'] == '?' for p in gpustats[2].processes)
 
     @pytest.mark.parametrize("scenario_failing_one_gpu", [
         pynvml.NVMLError_GpuIsLost,
@@ -580,7 +586,8 @@ class TestGPUStat(object):
         """Test a case where one GPU is failing (see #125)."""
         fp = StringIO()
         gpustats = gpustat.new_query()
-        gpustats.print_formatted(fp=fp, show_header=False)
+        gpustats.print_formatted(fp=fp, show_header=False,
+                                 show_gpuname=True, show_temperature=True)
         ret = fp.getvalue()
         print(ret)
 
@@ -597,6 +604,44 @@ class TestGPUStat(object):
         # other gpus should be displayed normally
         assert '[0] GeForce GTX TITAN 0' in lines[0]
         assert '[1] GeForce GTX TITAN 1' in lines[1]
+
+    @pytest.mark.parametrize("error", [
+        psutil.AccessDenied(48448), psutil.NoSuchProcess(48448),
+        FileNotFoundError("/proc/48448/stat"),
+    ])
+    def test_unreadable_process_retains_allocation(self, scenario_basic, error):
+        when(psutil).Process(pid=48448).thenRaise(error)
+        for _ in range(2):
+            stats = gpustat.new_query()
+            row = next(p for p in stats[0].processes if p['pid'] == 48448)
+            assert row['gpu_memory_usage'] == 4000
+            assert row['username'] == '?'
+            output = StringIO()
+            stats[0].print_to(output, show_cmd=True, show_user=True, show_pid=True)
+            assert '?:?/48448(4000M)' in remove_ansi_codes(output.getvalue())
+            assert len(stats[0].processes) == 2  # compute/graphics deduplication
+
+    @pytest.mark.parametrize("used, expected", [(0, 0), (None, None),
+                                                     ((1 << 64) - 1, None)])
+    def test_process_memory_unavailable(self, scenario_basic, used, expected):
+        process = types.SimpleNamespace(pid=48448, usedGpuMemory=used)
+        when(pynvml).nvmlDeviceGetComputeRunningProcesses(mock_gpu_handles[0]).thenReturn([process])
+        when(pynvml).nvmlDeviceGetGraphicsRunningProcesses(mock_gpu_handles[0]).thenReturn([])
+        assert gpustat.new_query()[0].processes[0]['gpu_memory_usage'] == expected
+
+    def test_compact_output_filters_desktop_processes(self, scenario_basic):
+        stats = gpustat.new_query()
+        gpu = stats[0]
+        normal = gpu.processes[0].copy()
+        gpu.processes[:] = [normal, dict(normal, username='gdm', pid=123),
+                            dict(normal, command='Xorg', pid=456)]
+        output = StringIO()
+        gpu.print_to(output, show_cmd=True, show_user=True, show_pid=True)
+        text = remove_ansi_codes(output.getvalue())
+        assert 'user1:python/48448(4000M)' in text
+        assert '/123' not in text and '/456' not in text
+        assert '76 %' in text and '8000 / 12287 MB' in text
+        assert 'GeForce' not in text and '°C' not in text
 
     def test_attributes_and_items(self, scenario_basic):
         """Test whether each property of `GPUStat` instance is well-defined."""
@@ -672,7 +717,7 @@ class TestGPUStat(object):
         # see MOCK_EXPECTED_OUTPUT_DEFAULT
         assert len("GeForce GTX TITAN 0") == 19
 
-        s = capture_output('gpustat', '--gpuname-width', '25')
+        s = capture_output('gpustat', '--show-gpuname', '--show-temperature', '--gpuname-width', '25')
         print("- Should have width=25")
         print(s)
         assert 'GeForce GTX TITAN 0       |' in remove_ansi_codes(s)
@@ -682,27 +727,27 @@ class TestGPUStat(object):
 
         # See #47 (since v1.0)
         print("- Should have width=10 (with truncation)")
-        s = capture_output('gpustat', '--gpuname-width', '10')
+        s = capture_output('gpustat', '--show-gpuname', '--show-temperature', '--gpuname-width', '10')
         print(s)
         assert '…X TITAN 0 |' in remove_ansi_codes(s)
         assert '…rce RTX 2 |' in remove_ansi_codes(s)
         #       1234567890
 
         print("- Should have width=1 (too short)")
-        s = capture_output('gpustat', '--gpuname-width', '1')
+        s = capture_output('gpustat', '--show-gpuname', '--show-temperature', '--gpuname-width', '1')
         print(s)
         assert '… |' in remove_ansi_codes(s)
 
         print("- Should have width=0: no name displayed.")
-        s = capture_output('gpustat', '--gpuname-width', '0')
+        s = capture_output('gpustat', '--show-gpuname', '--show-temperature', '--gpuname-width', '0')
         print(s)
         assert '[0]  80°C' in remove_ansi_codes(s)
 
         print("- Invalid inputs")
         with pytest.raises(AssertionError, match="Argparse failed"):
-            s = capture_output('gpustat', '--gpuname-width', '-1')
+            s = capture_output('gpustat', '--show-gpuname', '--show-temperature', '--gpuname-width', '-1')
         with pytest.raises(AssertionError, match="Argparse failed"):
-            s = capture_output('gpustat', '--gpuname-width', 'None')
+            s = capture_output('gpustat', '--show-gpuname', '--show-temperature', '--gpuname-width', 'None')
 
     def test_args_commandline_showoptions(self, scenario_basic):
         """Tests gpustat CLI with a variety of --show-xxx options. """
@@ -737,6 +782,7 @@ class TestGPUStat(object):
         """--color should work well even when executed without TERM,
         e.g. ssh localhost gpustat --color"""
         monkeypatch.setenv("TERM", "")
+        monkeypatch.delenv("NO_COLOR", raising=False)
 
         s = self.capture_output('gpustat', '--color', '--no-header').rstrip()
         print(s)
